@@ -219,9 +219,7 @@ module cve2_core import cve2_pkg::*; #(
   csr_num_e    csr_addr;
   logic [31:0] csr_rdata;
   logic [31:0] csr_wdata;
-  logic        illegal_csr_insn_id;    // CSR access to non-existent register,
-                                       // with wrong priviledge level,
-                                       // or missing write permissions
+  cve2_pkg::instr_status_e csr_status_id;
 
   // Data Memory Control
   logic        lsu_we;
@@ -449,7 +447,7 @@ module cve2_core import cve2_pkg::*; #(
     .csr_mtval_o          (csr_mtval),
     .priv_mode_i          (priv_mode_id),
     .csr_mstatus_tw_i     (csr_mstatus_tw),
-    .illegal_csr_insn_i   (illegal_csr_insn_id),
+    .csr_status_i         (csr_status_id),
 
     // LSU
     .lsu_req_o     (lsu_req),  // to load store unit
@@ -794,7 +792,7 @@ module cve2_core import cve2_pkg::*; #(
     .csr_save_cause_i  (csr_save_cause),
     .csr_mcause_i      (exc_cause),
     .csr_mtval_i       (csr_mtval),
-    .illegal_csr_insn_o(illegal_csr_insn_id),
+    .csr_status_o      (csr_status_id),
 
     // performance counter related signals
     .instr_ret_i                (perf_instr_ret_wb),

@@ -92,7 +92,7 @@ module cve2_id_stage #(
   output logic [31:0]               csr_mtval_o,
   input  cve2_pkg::priv_lvl_e       priv_mode_i,
   input  logic                      csr_mstatus_tw_i,
-  input  logic                      illegal_csr_insn_i,
+  input  cve2_pkg::instr_status_e    csr_status_i,
 
   // Interface to load store unit
   output logic                      lsu_req_o,
@@ -181,7 +181,8 @@ module cve2_id_stage #(
   import cve2_pkg::*;
 
   // Decoder/Controller, ID stage internal signals
-  logic        illegal_insn_dec;
+  instr_status_e decoder_status;
+  instr_status_e instr_status;
   logic        ebrk_insn;
   logic        mret_insn_dec;
   logic        dret_insn_dec;
@@ -274,6 +275,21 @@ module cve2_id_stage #(
   // CV-X-IF
   logic stall_coproc;
   logic scoreboard_busy;
+  logic csr_xif_insn;
+
+  assign csr_xif_insn = csr_access_o && (instr_status == InstrUnsupported);
+
+  // Merge CSR and instruction decoding into one architectural outcome.
+  // A locally forbidden instruction must never be delegated to XIF.
+  always_comb begin
+    if (decoder_status == InstrIllegal || csr_status_i == InstrIllegal) begin
+      instr_status = InstrIllegal;
+    end else if (decoder_status == InstrUnsupported || csr_status_i == InstrUnsupported) begin
+      instr_status = InstrUnsupported;
+    end else begin
+      instr_status = InstrSupported;
+    end
+  end
 
   ///////////////
   // ID-EX FSM //
@@ -320,8 +336,6 @@ module cve2_id_stage #(
     // This behavior applies similarly to all other instruction IDs.
 
     assign scoreboard_free = ~scoreboard_q[x_instr_id_q];
-
-
     assign scoreboard_busy = (scoreboard_q != '0);
 
 
@@ -347,10 +361,13 @@ module cve2_id_stage #(
       end
     end
 
-    assign multicycle_done = lsu_req_dec ? lsu_resp_valid_i : (illegal_insn_dec ? coproc_done : ex_valid_i);
+    assign multicycle_done = lsu_req_dec ? lsu_resp_valid_i : (instr_status == InstrUnsupported ? coproc_done : ex_valid_i);
 
     // Issue Interface
-    assign x_issue_valid_o      = instr_executing & illegal_insn_dec & (id_fsm_q == FIRST_CYCLE) & scoreboard_free;
+    // CSR accesses must not observe stale results from older outstanding XIF work.
+    assign x_issue_valid_o      = instr_executing & (instr_status == InstrUnsupported) &
+                                  (id_fsm_q == FIRST_CYCLE) & scoreboard_free &
+                                  (!csr_xif_insn || !scoreboard_busy);
     assign x_issue_req_o.instr  = instr_rdata_i;
     assign x_issue_req_o.id     = x_instr_id_q;
     assign x_issue_req_o.hartid = hart_id_i;
@@ -370,7 +387,9 @@ module cve2_id_stage #(
     // Result Interface
     assign x_result_ready_o = 1'b1;
 
-    assign illegal_insn_o = instr_valid_i & (illegal_csr_insn_i | (x_issue_valid_o & x_issue_ready_i & ~x_issue_resp_i.accept));
+    assign illegal_insn_o = instr_valid_i &
+        ((instr_status == InstrIllegal) ||
+         (x_issue_valid_o && x_issue_ready_i && !x_issue_resp_i.accept));
   end
 
   else begin: no_gen_xif
@@ -405,7 +424,7 @@ module cve2_id_stage #(
     assign unused_x_result_valid = x_result_valid_i;
     assign unused_x_result       = x_result_i;
 
-    assign illegal_insn_o = instr_valid_i & (illegal_csr_insn_i | illegal_insn_dec);
+    assign illegal_insn_o = instr_valid_i & (instr_status != InstrSupported);
   end
 
   /////////////
@@ -483,14 +502,19 @@ module cve2_id_stage #(
   // Register File MUX //
   ///////////////////////
 
-  // Suppress register write if there is an illegal CSR access or instruction is not executing
-  assign rf_we_id_o = rf_we_raw & instr_executing & ~illegal_csr_insn_i;
+  // A supported instruction writes locally; an unsupported one may write
+  // only after the coprocessor returns a result.
+  assign rf_we_id_o = rf_we_raw & instr_executing &
+                      ((instr_status == InstrSupported) ||
+                       (XInterface && instr_status == InstrUnsupported &&
+                        id_fsm_q == MULTI_CYCLE));
 
   // Register file write data mux
   always_comb begin : rf_wdata_id_mux
     unique case ($bits(rf_wd_sel_e)'({rf_wdata_sel}))
       RF_WD_EX:     rf_wdata_id_o   = result_ex_i;
-      RF_WD_CSR:    rf_wdata_id_o   = csr_rdata_i;
+      RF_WD_CSR:    rf_wdata_id_o   = (instr_status == InstrUnsupported) ?
+                                         x_result_i.data : csr_rdata_i;
       RF_WD_COPROC: rf_wdata_id_o   = XInterface? x_result_i.data : result_ex_i;
       default:      rf_wdata_id_o   = result_ex_i;
     endcase
@@ -510,7 +534,7 @@ module cve2_id_stage #(
     .rst_ni(rst_ni),
 
     // controller
-    .illegal_insn_o(illegal_insn_dec),
+    .instr_status_o(decoder_status),
     .ebrk_insn_o   (ebrk_insn),
     .mret_insn_o   (mret_insn_dec),
     .dret_insn_o   (dret_insn_dec),
@@ -712,7 +736,8 @@ module cve2_id_stage #(
   // csv_access_o is set when CSR access instruction is present and is used to compute whether a CSR
   // access is illegal. A combinational loop would be created if csr_op_en_o was used along (as
   // asserting it for an illegal csr access would result in a flush that would need to deassert it).
-  assign csr_op_en_o             = csr_access_o & instr_executing & instr_id_done_o;
+  assign csr_op_en_o             = csr_access_o & instr_executing & instr_id_done_o &
+                                   (instr_status == InstrSupported);
 
   assign alu_operator_ex_o           = alu_operator;
   assign alu_operand_a_ex_o          = alu_operand_a;
@@ -831,12 +856,14 @@ module cve2_id_stage #(
               id_fsm_d      = MULTI_CYCLE;
               rf_we_raw     = 1'b0;
             end
-            illegal_insn_dec: begin
+            (instr_status == InstrUnsupported): begin
 
               // CV-X-IF
               if(XInterface) begin
                 if(x_issue_valid_o && x_issue_ready_i) begin
-                  if(x_issue_resp_i.accept && x_issue_resp_i.writeback) begin
+                  // A CSR write with rd=x0 still needs to wait for the result:
+                  // the side effect must complete before subsequent instructions.
+                  if(x_issue_resp_i.accept && (x_issue_resp_i.writeback || csr_xif_insn)) begin
                       id_fsm_d = MULTI_CYCLE;
                       stall_coproc = 1'b1;
                       coproc_done  = 1'b0;
@@ -866,7 +893,7 @@ module cve2_id_stage #(
           if(multdiv_en_dec) begin
             rf_we_raw       = rf_we_dec & ex_valid_i;
           end
-          if (illegal_insn_dec && XInterface) begin
+          if (instr_status == InstrUnsupported && XInterface) begin
             coproc_done     = x_result_valid_i;
             rf_we_raw       = x_result_valid_i & x_result_i.we;
           end
@@ -876,7 +903,7 @@ module cve2_id_stage #(
             stall_multdiv   = multdiv_en_dec;
             stall_branch    = branch_in_dec;
             stall_jump      = jump_in_dec;
-            stall_coproc    = XInterface & illegal_insn_dec;
+            stall_coproc    = XInterface & (instr_status == InstrUnsupported);
           end
         end
 
@@ -943,9 +970,9 @@ module cve2_id_stage #(
 
   // Signal which instructions to count as retired in minstret, all traps along with ebrk and
   // ecall instructions are not counted.
-  assign instr_perf_count_id_o = ~ebrk_insn & ~ecall_insn_dec & ~illegal_insn_dec &
+  assign instr_perf_count_id_o = ~ebrk_insn & ~ecall_insn_dec & ~illegal_insn_o &
       ~(dret_insn_dec & ~debug_mode_o) &
-      ~illegal_csr_insn_i & ~instr_fetch_err_i;
+      ~instr_fetch_err_i;
 
   // An instruction is ready to move to the writeback
   assign en_wb_o = instr_done;
@@ -988,7 +1015,7 @@ module cve2_id_stage #(
 
   // Branch decision must be valid when jumping.
   `ASSERT_KNOWN_IF(CVE2BranchDecisionValid, branch_decision_i,
-      instr_valid_i && !(illegal_csr_insn_i || instr_fetch_err_i))
+      instr_valid_i && !((instr_status == InstrIllegal) || instr_fetch_err_i))
 
   // Instruction delivered to ID stage can not contain X.
   `ASSERT_KNOWN_IF(CVE2IdInstrKnown, instr_rdata_i,
@@ -1000,7 +1027,8 @@ module cve2_id_stage #(
 
   // Multicycle enable signals must be unique.
   `ASSERT(IbexMulticycleEnableUnique,
-      $onehot0({lsu_req_dec, multdiv_en_dec, branch_in_dec, jump_in_dec, illegal_insn_dec}))
+      $onehot0({lsu_req_dec, multdiv_en_dec, branch_in_dec, jump_in_dec,
+                (instr_status == InstrUnsupported)}))
 
   // Duplicated instruction flops must match
   // === as DV environment can produce instructions with Xs in, so must use precise match that

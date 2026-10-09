@@ -214,7 +214,7 @@ module cve2_controller #(
                          (mret_insn | (csr_mstatus_tw_i & wfi_insn));
 
   // This is recorded in the illegal_insn_q flop to help timing.  Specifically
-  // it is needed to break the path from cve2_cs_registers/illegal_csr_insn_o
+  // it is needed to break the path from cve2_cs_registers/csr_status_o
   // to pc_set_o.  Clear when controller is in FLUSH so it won't remain set
   // once illegal instruction is handled.
   // All terms in this expression are qualified by instr_valid_i

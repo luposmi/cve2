@@ -24,7 +24,7 @@ module cve2_decoder #(
   input  logic                 rst_ni,
 
   // to/from controller
-  output logic                 illegal_insn_o,        // illegal instr encountered
+  output cve2_pkg::instr_status_e instr_status_o,     // local decode outcome
   output logic                 ebrk_insn_o,           // trap instr encountered
   output logic                 mret_insn_o,           // return from exception instr
                                                       // encountered
@@ -101,9 +101,8 @@ module cve2_decoder #(
 
   import cve2_pkg::*;
 
-  logic        illegal_insn;
+  instr_status_e instr_status;
   logic        illegal_reg_rv32e;
-  logic        csr_illegal;
   logic        rf_we;
 
   logic [31:0] instr;
@@ -220,7 +219,6 @@ module cve2_decoder #(
     rf_ren_c_o            = 1'b0;
 
     csr_access_o          = 1'b0;
-    csr_illegal           = 1'b0;
     csr_op                = CSR_OP_READ;
 
     data_we_o             = 1'b0;
@@ -228,7 +226,7 @@ module cve2_decoder #(
     data_sign_extension_o = 1'b0;
     data_req_o            = 1'b0;
 
-    illegal_insn          = 1'b0;
+    instr_status          = InstrSupported;
     ebrk_insn_o           = 1'b0;
     mret_insn_o           = 1'b0;
     dret_insn_o           = 1'b0;
@@ -268,7 +266,7 @@ module cve2_decoder #(
           rf_we            = 1'b1;
         end
         if (instr[14:12] != 3'b0) begin
-          illegal_insn = 1'b1;
+          instr_status = InstrUnsupported;
         end
 
         rf_ren_a_o = 1'b1;
@@ -283,8 +281,8 @@ module cve2_decoder #(
           3'b100,
           3'b101,
           3'b110,
-          3'b111:  illegal_insn = 1'b0;
-          default: illegal_insn = 1'b1;
+          3'b111:  instr_status = InstrSupported;
+          default: instr_status = InstrUnsupported;
         endcase
 
         rf_ren_a_o = 1'b1;
@@ -302,7 +300,7 @@ module cve2_decoder #(
         data_we_o          = 1'b1;
 
         if (instr[14]) begin
-          illegal_insn = 1'b1;
+          instr_status = InstrUnsupported;
         end
 
         // store size
@@ -310,7 +308,7 @@ module cve2_decoder #(
           2'b00:   data_type_o  = 2'b10; // sb
           2'b01:   data_type_o  = 2'b01; // sh
           2'b10:   data_type_o  = 2'b00; // sw
-          default: illegal_insn = 1'b1;
+          default: instr_status = InstrUnsupported;
         endcase
       end
 
@@ -329,11 +327,11 @@ module cve2_decoder #(
           2'b10: begin
             data_type_o = 2'b00;      // lw
             if (instr[14]) begin
-              illegal_insn = 1'b1;    // lwu does not exist
+              instr_status = InstrUnsupported;    // lwu does not exist
             end
           end
           default: begin
-            illegal_insn = 1'b1;
+            instr_status = InstrUnsupported;
           end
         endcase
       end
@@ -360,22 +358,22 @@ module cve2_decoder #(
           3'b011,
           3'b100,
           3'b110,
-          3'b111: illegal_insn = 1'b0;
+          3'b111: instr_status = InstrSupported;
 
           3'b001: begin
             unique case (instr[31:27])
-              5'b0_0000: illegal_insn = (instr[26:25] == 2'b00) ? 1'b0 : 1'b1;        // slli
+              5'b0_0000: instr_status = (instr[26:25] == 2'b00) ? InstrSupported : InstrUnsupported;        // slli
               5'b0_0100: begin                                                        // sloi
-                illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+                instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
               end
               5'b0_1001,                                                              // bclri
               5'b0_0101,                                                              // bseti
-              5'b0_1101: illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1;           // binvi
+              5'b0_1101: instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported;           // binvi
               5'b0_0001: begin
                 if (instr[26] == 1'b0) begin                                          // shfl
-                  illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+                  instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
                 end else begin
-                  illegal_insn = 1'b1;
+                  instr_status = InstrUnsupported;
                 end
               end
               5'b0_1100: begin
@@ -384,68 +382,68 @@ module cve2_decoder #(
                   7'b000_0001,                                                         // ctz
                   7'b000_0010,                                                         // cpop
                   7'b000_0100,                                                         // sext.b
-                  7'b000_0101: illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1;      // sext.h
+                  7'b000_0101: instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported;      // sext.h
                   7'b001_0000,                                                         // crc32.b
                   7'b001_0001,                                                         // crc32.h
                   7'b001_0010,                                                         // crc32.w
                   7'b001_1000,                                                         // crc32c.b
                   7'b001_1001,                                                         // crc32c.h
                   7'b001_1010: begin                                                   // crc32c.w
-                    illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+                    instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
                   end
-                  default: illegal_insn = 1'b1;
+                  default: instr_status = InstrUnsupported;
                 endcase
               end
-              default : illegal_insn = 1'b1;
+              default : instr_status = InstrUnsupported;
             endcase
           end
 
           3'b101: begin
             if (instr[26]) begin
-              illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1;                       // fsri
+              instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported;                       // fsri
             end else begin
               unique case (instr[31:27])
                 5'b0_0000,                                                             // srli
-                5'b0_1000: illegal_insn = (instr[26:25] == 2'b00) ? 1'b0 : 1'b1;       // srai
+                5'b0_1000: instr_status = (instr[26:25] == 2'b00) ? InstrSupported : InstrUnsupported;       // srai
 
                 5'b0_0100: begin                                                       // sroi
-                  illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+                  instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
                 end
                 5'b0_1100,                                                             // rori
-                5'b0_1001: illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1;          // bexti
+                5'b0_1001: instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported;          // bexti
 
                 5'b0_1101: begin
                   if (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) begin
-                    illegal_insn = 1'b0;                                               // grevi
+                    instr_status = InstrSupported;                                               // grevi
                   end else if (RV32B == RV32BBalanced) begin
-                    illegal_insn = (instr[24:20] == 5'b11000) ? 1'b0 : 1'b1;           // rev8
+                    instr_status = (instr[24:20] == 5'b11000) ? InstrSupported : InstrUnsupported;           // rev8
                   end else begin
-                    illegal_insn = 1'b1;
+                    instr_status = InstrUnsupported;
                   end
                 end
                 5'b0_0101: begin
                   if (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) begin
-                    illegal_insn = 1'b0;                                              // gorci
+                    instr_status = InstrSupported;                                              // gorci
                   end else if (instr[24:20] == 5'b00111) begin
-                    illegal_insn = (RV32B == RV32BBalanced) ? 1'b0 : 1'b1;            // orc.b
+                    instr_status = (RV32B == RV32BBalanced) ? InstrSupported : InstrUnsupported;            // orc.b
                   end else begin
-                    illegal_insn = 1'b1;
+                    instr_status = InstrUnsupported;
                   end
                 end
                 5'b0_0001: begin
                   if (instr[26] == 1'b0) begin                                        // unshfl
-                    illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+                    instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
                   end else begin
-                    illegal_insn = 1'b1;
+                    instr_status = InstrUnsupported;
                   end
                 end
 
-                default: illegal_insn = 1'b1;
+                default: instr_status = InstrUnsupported;
               endcase
             end
           end
 
-          default: illegal_insn = 1'b1;
+          default: instr_status = InstrUnsupported;
         endcase
       end
 
@@ -454,7 +452,7 @@ module cve2_decoder #(
         rf_ren_b_o      = 1'b1;
         rf_we           = 1'b1;
         if ({instr[26], instr[13:12]} == {1'b1, 2'b01}) begin
-          illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1; // cmix / cmov / fsl / fsr
+          instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported; // cmix / cmov / fsl / fsr
         end else begin
           unique case ({instr[31:25], instr[14:12]})
             // RV32I ALU operations
@@ -467,7 +465,7 @@ module cve2_decoder #(
             {7'b000_0000, 3'b111},
             {7'b000_0000, 3'b001},
             {7'b000_0000, 3'b101},
-            {7'b010_0000, 3'b101}: illegal_insn = 1'b0;
+            {7'b010_0000, 3'b101}: instr_status = InstrSupported;
 
             // RV32B zba
             {7'b001_0000, 3'b010}, // sh1add
@@ -492,7 +490,7 @@ module cve2_decoder #(
             {7'b011_0100, 3'b001}, // binv
             {7'b010_0100, 3'b101}, // bext
             // RV32B zbf
-            {7'b010_0100, 3'b111}: illegal_insn = (RV32B != RV32BNone) ? 1'b0 : 1'b1; // bfp
+            {7'b010_0100, 3'b111}: instr_status = (RV32B != RV32BNone) ? InstrSupported : InstrUnsupported; // bfp
             // RV32B zbp
             {7'b011_0100, 3'b101}, // grev
             {7'b001_0100, 3'b101}, // gorc
@@ -507,55 +505,55 @@ module cve2_decoder #(
             {7'b000_0101, 3'b001}, // clmul
             {7'b000_0101, 3'b010}, // clmulr
             {7'b000_0101, 3'b011}: begin // clmulh
-              illegal_insn = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? 1'b0 : 1'b1;
+              instr_status = (RV32B == RV32BOTEarlGrey || RV32B == RV32BFull) ? InstrSupported : InstrUnsupported;
             end
             // RV32B zbe
             {7'b010_0100, 3'b110}, // bdecompress
-            {7'b000_0100, 3'b110}: illegal_insn = (RV32B == RV32BFull) ? 1'b0 : 1'b1; // bcompress
+            {7'b000_0100, 3'b110}: instr_status = (RV32B == RV32BFull) ? InstrSupported : InstrUnsupported; // bcompress
 
             // RV32M instructions
             {7'b000_0001, 3'b000}: begin // mul
               multdiv_operator_o    = MD_OP_MULL;
               multdiv_signed_mode_o = 2'b00;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b001}: begin // mulh
               multdiv_operator_o    = MD_OP_MULH;
               multdiv_signed_mode_o = 2'b11;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b010}: begin // mulhsu
               multdiv_operator_o    = MD_OP_MULH;
               multdiv_signed_mode_o = 2'b01;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b011}: begin // mulhu
               multdiv_operator_o    = MD_OP_MULH;
               multdiv_signed_mode_o = 2'b00;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b100}: begin // div
               multdiv_operator_o    = MD_OP_DIV;
               multdiv_signed_mode_o = 2'b11;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b101}: begin // divu
               multdiv_operator_o    = MD_OP_DIV;
               multdiv_signed_mode_o = 2'b00;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b110}: begin // rem
               multdiv_operator_o    = MD_OP_REM;
               multdiv_signed_mode_o = 2'b11;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             {7'b000_0001, 3'b111}: begin // remu
               multdiv_operator_o    = MD_OP_REM;
               multdiv_signed_mode_o = 2'b00;
-              illegal_insn          = (RV32M == RV32MNone) ? 1'b1 : 1'b0;
+              instr_status          = (RV32M == RV32MNone) ? InstrUnsupported : InstrSupported;
             end
             default: begin
-              illegal_insn = 1'b1;
+              instr_status = InstrUnsupported;
             end
           endcase
         end
@@ -584,7 +582,7 @@ module cve2_decoder #(
             end
           end
           default: begin
-            illegal_insn       = 1'b1;
+            instr_status       = InstrUnsupported;
           end
         endcase
       end
@@ -611,12 +609,12 @@ module cve2_decoder #(
               wfi_insn_o = 1'b1;
 
             default:
-              illegal_insn = 1'b1;
+              instr_status = InstrUnsupported;
           endcase
 
           // rs1 and rd must be 0
           if (instr_rs1 != 5'b0 || instr_rd != 5'b0) begin
-            illegal_insn = 1'b1;
+            instr_status = InstrUnsupported;
           end
         end else begin
           // instruction to read/modify CSR
@@ -632,29 +630,28 @@ module cve2_decoder #(
             2'b01:   csr_op = CSR_OP_WRITE;
             2'b10:   csr_op = CSR_OP_SET;
             2'b11:   csr_op = CSR_OP_CLEAR;
-            default: csr_illegal = 1'b1;
+            default: instr_status = InstrIllegal;
           endcase
 
-          illegal_insn = csr_illegal;
         end
 
       end
       default: begin
-        illegal_insn = 1'b1;
+        instr_status = InstrUnsupported;
       end
     endcase
 
     // make sure illegal compressed instructions cause illegal instruction exceptions
     if (illegal_c_insn_i) begin
-      illegal_insn = 1'b1;
+      instr_status = InstrIllegal;
     end
 
-    // make sure illegal instructions detected in the decoder do not propagate from decoder
-    // into register file, LSU, EX, WB, CSRs, PC
+    // Suppress local execution of unsupported and illegal instructions.
+    // Unsupported instructions may execute through RV-X-IF.
     // NOTE: instructions can also be detected to be illegal inside the CSRs (upon accesses with
     // insufficient privileges), or when accessing non-available registers in RV32E,
     // these cases are not handled here
-    if (illegal_insn) begin
+    if (instr_status != InstrSupported) begin
       rf_we           = 1'b0;
       data_req_o      = 1'b0;
       data_we_o       = 1'b0;
@@ -1168,13 +1165,15 @@ module cve2_decoder #(
     endcase
   end
 
-  // do not enable multdiv in case of illegal instruction exceptions
-  assign mult_en_o = illegal_insn ? 1'b0 : mult_sel_o;
-  assign div_en_o  = illegal_insn ? 1'b0 : div_sel_o;
+  // Enable local multiply/divide execution only for supported instructions.
+  assign mult_en_o = (instr_status == InstrSupported) ? mult_sel_o : 1'b0;
+  assign div_en_o  = (instr_status == InstrSupported) ? div_sel_o : 1'b0;
 
-  // make sure instructions accessing non-available registers in RV32E cause illegal
-  // instruction exceptions
-  assign illegal_insn_o = illegal_insn | illegal_reg_rv32e;
+  // Invalid compressed instructions, unavailable RV32E registers and malformed
+  // CSR encodings cause illegal instruction exceptions. Other unrecognized
+  // encodings are unsupported and eligible for external implementation (via
+  // RV-X-IF)
+  assign instr_status_o = illegal_reg_rv32e ? InstrIllegal : instr_status;
 
   // do not propgate regfile write enable if non-available registers are accessed in RV32E
   assign rf_we_o = rf_we & ~illegal_reg_rv32e;

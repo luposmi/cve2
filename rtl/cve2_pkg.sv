@@ -9,6 +9,14 @@
  */
 package cve2_pkg;
 
+  // Instruction decode outcome. Only UNSUPPORTED may be offered to CV-X-IF;
+  // ILLEGAL is a locally forbidden access, and must trap without delegation.
+  typedef enum logic [1:0] {
+    InstrSupported,
+    InstrUnsupported,
+    InstrIllegal
+  } instr_status_e;
+
   ////////////////
   // IO Structs //
   ////////////////

@@ -88,9 +88,7 @@ module cve2_cs_registers #(
   input  logic                 csr_save_cause_i,
   input  cve2_pkg::exc_cause_e csr_mcause_i,
   input  logic [31:0]          csr_mtval_i,
-  output logic                 illegal_csr_insn_o,     // access to non-existent CSR,
-                                                        // with wrong priviledge level, or
-                                                        // missing write permissions
+  output cve2_pkg::instr_status_e csr_status_o,  // Local CSR decode result
   // Performance Counters
   input  logic                 instr_ret_i,                 // instr retired in ID/EX stage
   input  logic                 instr_ret_compressed_i,      // compressed instr retired
@@ -234,11 +232,6 @@ import cve2_pkg::*;
   logic        csr_we_int;
   logic        csr_wr;
 
-  // Access violation signals
-  logic        illegal_csr;
-  logic        illegal_csr_priv;
-  logic        illegal_csr_write;
-
   logic [7:0]  unused_boot_addr;
   logic [2:0]  unused_csr_addr;
 
@@ -253,11 +246,6 @@ import cve2_pkg::*;
   assign unused_csr_addr    = csr_addr[7:5];
   assign mhpmcounter_idx    = csr_addr[4:0];
 
-  // See RISC-V Privileged Specification, version 1.11, Section 2.1
-  assign illegal_csr_priv   = (csr_addr[9:8] > {priv_lvl_q});
-  assign illegal_csr_write  = (csr_addr[11:10] == 2'b11) && csr_wr;
-  assign illegal_csr_insn_o = csr_access_i & (illegal_csr | illegal_csr_write | illegal_csr_priv);
-
   // mip CSR is purely combinational - must be able to re-enable the clock upon WFI
   assign mip.irq_software = irq_software_i;
   assign mip.irq_timer    = irq_timer_i;
@@ -267,7 +255,7 @@ import cve2_pkg::*;
   // read logic
   always_comb begin
     csr_rdata_int = '0;
-    illegal_csr   = 1'b0;
+    csr_status_o  = InstrSupported;
 
     unique case (csr_addr_i)
       // mvendorid: encoding of manufacturer/provider
@@ -345,7 +333,7 @@ import cve2_pkg::*;
           csr_rdata_int[CSR_MSECCFG_MMWP_BIT] = pmp_mseccfg.mmwp;
           csr_rdata_int[CSR_MSECCFG_RLB_BIT]  = pmp_mseccfg.rlb;
         end else begin
-          illegal_csr = 1'b1;
+          csr_status_o = InstrIllegal;
         end
       end
 
@@ -353,7 +341,7 @@ import cve2_pkg::*;
         if (PMPEnable) begin
           csr_rdata_int = '0;
         end else begin
-          illegal_csr = 1'b1;
+          csr_status_o = InstrIllegal;
         end
       end
 
@@ -385,19 +373,19 @@ import cve2_pkg::*;
 
       CSR_DCSR: begin
         csr_rdata_int = dcsr_q;
-        illegal_csr = ~debug_mode_i;
+        csr_status_o = debug_mode_i ? InstrSupported : InstrIllegal;
       end
       CSR_DPC: begin
         csr_rdata_int = depc_q;
-        illegal_csr = ~debug_mode_i;
+        csr_status_o = debug_mode_i ? InstrSupported : InstrIllegal;
       end
       CSR_DSCRATCH0: begin
         csr_rdata_int = dscratch0_q;
-        illegal_csr = ~debug_mode_i;
+        csr_status_o = debug_mode_i ? InstrSupported : InstrIllegal;
       end
       CSR_DSCRATCH1: begin
         csr_rdata_int = dscratch1_q;
-        illegal_csr = ~debug_mode_i;
+        csr_status_o = debug_mode_i ? InstrSupported : InstrIllegal;
       end
 
       // machine counter/timers
@@ -442,27 +430,27 @@ import cve2_pkg::*;
       // Debug triggers
       CSR_TSELECT: begin
         csr_rdata_int = tselect_rdata;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
       CSR_TDATA1: begin
         csr_rdata_int = tmatch_control_rdata;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
       CSR_TDATA2: begin
         csr_rdata_int = tmatch_value_rdata;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
       CSR_TDATA3: begin
         csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
       CSR_MCONTEXT: begin
         csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
       CSR_SCONTEXT: begin
         csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_status_o = DbgTriggerEn ? InstrSupported : InstrIllegal;
       end
 
       // Custom CSR for LFSR re-seeding (cannot be read)
@@ -471,7 +459,7 @@ import cve2_pkg::*;
       end
 
       default: begin
-        illegal_csr = 1'b1;
+        csr_status_o = InstrUnsupported;
       end
     endcase
 
@@ -481,8 +469,18 @@ import cve2_pkg::*;
                            CSR_PMPADDR4,  CSR_PMPADDR5,  CSR_PMPADDR6,  CSR_PMPADDR7,
                            CSR_PMPADDR8,  CSR_PMPADDR9,  CSR_PMPADDR10, CSR_PMPADDR11,
                            CSR_PMPADDR12, CSR_PMPADDR13, CSR_PMPADDR14, CSR_PMPADDR15}) begin
-        illegal_csr = 1'b1;
+        csr_status_o = InstrIllegal;
       end
+    end
+
+    if ((csr_addr[9:8] > {priv_lvl_q}) ||
+        ((csr_addr[11:10] == 2'b11) && csr_wr) ||
+        ((csr_status_o == InstrUnsupported) && (csr_addr[11:4] == 8'h7b))) begin
+      csr_status_o = InstrIllegal;
+    end
+
+    if (!csr_access_i) begin
+      csr_status_o = InstrSupported;
     end
   end
 
@@ -738,7 +736,7 @@ import cve2_pkg::*;
   assign csr_wr = (csr_op_i inside {CSR_OP_WRITE, CSR_OP_SET, CSR_OP_CLEAR});
 
   // only write CSRs during one clock cycle
-  assign csr_we_int  = csr_wr & csr_op_en_i & ~illegal_csr_insn_o;
+  assign csr_we_int  = csr_wr & csr_op_en_i & (csr_status_o == InstrSupported);
 
   assign csr_rdata_o = csr_rdata_int;
 
@@ -1529,8 +1527,8 @@ import cve2_pkg::*;
     assign rvfi_csr_if.rvfi_csr_wdata = rvfi_csr_wdata;
     assign rvfi_csr_if.rvfi_csr_rmask = rvfi_csr_rmask;
     assign rvfi_csr_if.rvfi_csr_wmask = rvfi_csr_wmask;
-    assign rvfi_csr_rmask_q =  ((~csr_wr & csr_op_en_i & ~illegal_csr_insn_o)) ? -1 : 0;
-    assign rvfi_csr_wmask_q =   ((csr_wr & csr_op_en_i & ~illegal_csr_insn_o)) ? -1 : 0;
+    assign rvfi_csr_rmask_q =  ((~csr_wr & csr_op_en_i & (csr_status_o == InstrSupported))) ? -1 : 0;
+    assign rvfi_csr_wmask_q =   ((csr_wr & csr_op_en_i & (csr_status_o == InstrSupported))) ? -1 : 0;
     always @(posedge clknrst_if.clk) begin
         rvfi_csr_addr  = csr_addr_i;
         rvfi_csr_rdata = csr_rdata_int;
@@ -1550,8 +1548,8 @@ import cve2_pkg::*;
     assign rvfi_csr_if.rvfi_named_csr_wdata[CSR_ADDR] = (!rvfi_csr_bypass) ? rvfi_``CSR_NAME``_csr_wdata : ``CSR_WDATA``; \
     assign rvfi_csr_if.rvfi_named_csr_rmask[CSR_ADDR] = (!rvfi_csr_bypass) ? rvfi_``CSR_NAME``_csr_rmask : rvfi_``CSR_NAME``_csr_rmask_q; \
     assign rvfi_csr_if.rvfi_named_csr_wmask[CSR_ADDR] = (!rvfi_csr_bypass) ? rvfi_``CSR_NAME``_csr_wmask : rvfi_``CSR_NAME``_csr_wmask_q; \
-    assign rvfi_``CSR_NAME``_csr_rmask_q =  ((~csr_wr & csr_op_en_i & ~illegal_csr_insn_o & (csr_addr_i == CSR_ADDR)) CSR_RMASK) ? -1 : 0; \
-    assign rvfi_``CSR_NAME``_csr_wmask_q =   ((csr_wr & csr_op_en_i & ~illegal_csr_insn_o & (csr_addr_i == CSR_ADDR)) CSR_WMASK) ? -1 : 0; \
+    assign rvfi_``CSR_NAME``_csr_rmask_q =  ((~csr_wr & csr_op_en_i & (csr_status_o == InstrSupported) & (csr_addr_i == CSR_ADDR)) CSR_RMASK) ? -1 : 0; \
+    assign rvfi_``CSR_NAME``_csr_wmask_q =   ((csr_wr & csr_op_en_i & (csr_status_o == InstrSupported) & (csr_addr_i == CSR_ADDR)) CSR_WMASK) ? -1 : 0; \
     always @(posedge clknrst_if.clk) begin \
         rvfi_``CSR_NAME``_csr_rdata = ``CSR_RDATA``; \
         rvfi_``CSR_NAME``_csr_wdata = ``CSR_WDATA``; \
